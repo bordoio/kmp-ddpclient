@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 — 2026-08-05
 
-### 0.1.0
+First public release, on Maven Central as `io.bordo:ddpclient` and `io.bordo:ddpclient-ejson`.
+Extracted from a production app where it had been in use for two years.
 
-First public release. Extracted from the MonoChatMobile app, where it had been in production use.
+Targets: Android, iosArm64, iosSimulatorArm64, iosX64.
 
 Fixes made while preparing the extraction, all previously shipping:
 

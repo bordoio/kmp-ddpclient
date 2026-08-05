@@ -27,7 +27,23 @@ jobs:
       - name: Run tests
         run: ./gradlew build
 
+      # A version can only be deployed to Central once; a second attempt fails the whole run. That
+      # happens whenever a release is cut for a version that was already deployed by hand, or when
+      # this workflow is simply re-run. Skip instead of failing.
+      - name: Check whether this version is already on Central
+        id: published
+        run: |
+          VERSION="$(grep '^VERSION_NAME=' gradle.properties | cut -d'=' -f2)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if curl -sfI -o /dev/null "https://repo1.maven.org/maven2/io/bordo/ddpclient/$VERSION/ddpclient-$VERSION.pom"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::io.bordo:ddpclient:$VERSION is already on Maven Central — skipping publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to Maven Central
+        if: ${{ steps.published.outputs.exists != 'true' }}
         # publishToMavenCentral (not publishAndReleaseToMavenCentral) uploads the deployment but
         # leaves it PENDING in the Central Portal, so a human confirms before it goes live and
         # becomes permanent. Switch to publishAndRelease once you trust the pipeline.
