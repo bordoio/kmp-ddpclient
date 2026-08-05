@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 — 2026-08-05
 
 - `sendMessage` sent the same message more than once. Both of its branches collected a `StateFlow`
   (`authenticationState` and `connectionState`), neither of which ever completes, so the collector
