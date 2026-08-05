@@ -19,6 +19,13 @@ plugins {
 }
 
 subprojects {
+    // Set on the project, not just on the publication. The publish plugin only needs
+    // coordinates(), but Gradle matches an included build's projects to external dependencies by
+    // project.group + project.name -- so without this, a consumer using includeBuild() on this
+    // repo gets "Could not find io.bordo:ddpclient" and falls through to Maven Central.
+    group = providers.gradleProperty("GROUP").get()
+    version = providers.gradleProperty("VERSION_NAME").get()
+
     pluginManager.withPlugin("com.vanniktech.maven.publish.base") {
         extensions.configure<MavenPublishBaseExtension> {
             // JavadocJar.Empty() satisfies Central's javadoc requirement without wiring Dokka --
