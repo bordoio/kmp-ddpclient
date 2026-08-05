@@ -7,7 +7,7 @@ A Kotlin Multiplatform client for [Meteor](https://www.meteor.com/)'s DDP protoc
 websockets: connection management with reconnect, subscriptions backed by an in-memory minimongo
 mirror, and method calls exposed as coroutine `Flow`s.
 
-Targets: **Android**, **iosArm64**, **iosSimulatorArm64**, **iosX64**.
+Targets: **Android**, **JVM**, **iosArm64**, **iosSimulatorArm64**, **iosX64**.
 
 ## Contents
 
@@ -36,7 +36,7 @@ Targets: **Android**, **iosArm64**, **iosSimulatorArm64**, **iosX64**.
 kotlin {
     sourceSets {
         commonMain.dependencies {
-            implementation("io.bordo:ddpclient:0.1.2")
+            implementation("io.bordo:ddpclient:0.2.0")
         }
     }
 }
@@ -742,8 +742,6 @@ All three of these are fixable without changing the public API.
 
 ### Scope
 
-- **No JVM target.** Needs `actual`s for the HTTP engine, platform exceptions, and UUID. Non-breaking
-  to add.
 - **No Swift Package.** `DDPClient.call<T>()` is `inline` + `reified` and cannot be exported to
   Objective-C, so a usable Swift API needs non-reified overloads first.
 

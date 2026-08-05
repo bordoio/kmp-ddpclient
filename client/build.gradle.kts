@@ -34,6 +34,7 @@ kotlin {
     // Intel-Mac simulators, and a prerequisite for an XCFramework later. Free: the default
     // hierarchy routes it through the existing iosMain actuals.
     iosX64()
+    jvm()
 
     targets.configureEach {
         compilations.configureEach {
@@ -51,6 +52,16 @@ kotlin {
     }
 
     sourceSets {
+        // Android and the JVM share every actual in this module -- same UUID, same exception
+        // umbrella, same OkHttp engine -- so they get an intermediate source set instead of two
+        // copies. Wired by hand rather than through applyDefaultHierarchyTemplate's
+        // `group("jvmShared") { withJvm(); withAndroidTarget() }`: withAndroidTarget() matches the
+        // classic androidTarget(), not the `com.android.kotlin.multiplatform.library` target this
+        // module uses, so the group silently came out JVM-only and androidMain lost its actuals.
+        val jvmSharedMain by creating { dependsOn(commonMain.get()) }
+        androidMain.get().dependsOn(jvmSharedMain)
+        jvmMain.get().dependsOn(jvmSharedMain)
+
         commonMain.dependencies {
             api(project(":ddpclient-ejson")) // plain path: portable across both repos
             implementation(libs.kotlinx.datetime)
@@ -77,7 +88,7 @@ kotlin {
             implementation(libs.slf4j.simple)
             implementation(libs.turbine)
         }
-        androidMain.dependencies {
+        getByName("jvmSharedMain").dependencies {
             implementation(libs.ktor.client.okhttp)
         }
         getByName("androidHostTest").dependencies {

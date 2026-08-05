@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.0 — 2026-08-05
+
+- **Added a JVM target.** Targets are now Android, JVM, iosArm64, iosSimulatorArm64 and iosX64,
+  published as `ddpclient-jvm` and `ddpclient-ejson-jvm`. No API changes — `commonMain` had no
+  platform dependencies, so the target needed only the three existing `actual`s.
+
+  The JVM uses the OkHttp engine, the same as Android, and shares all three `actual`s with it from a
+  new `jvmSharedMain` source set. That means the `java.io.IOException` allowlist that classifies
+  transport failures as recoverable — proven on Android against this protocol — applies to the JVM
+  unchanged.
+
+  The full common test suite now runs on the JVM as well as the Android host: 166 tests, including
+  the ones that need a live websocket server.
+
 ## 0.1.2 — 2026-08-05
 
 Two APIs that never worked. Both were covered by passing tests that asserted the broken behaviour,

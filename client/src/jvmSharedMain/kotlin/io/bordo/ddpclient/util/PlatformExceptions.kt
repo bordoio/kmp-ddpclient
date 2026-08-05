@@ -9,7 +9,7 @@ import kotlin.reflect.KClass
 actual val platformExceptions: Set<KClass<out Exception>>
     get() = setOf(
         java.util.concurrent.CancellationException::class,
-        // On Android the injected ktor engine is OkHttp. A rejected WebSocket upgrade
+        // On Android and the JVM the injected ktor engine is OkHttp. A rejected WebSocket upgrade
         // (server replies with a non-101 status, e.g. "400 Bad Request") surfaces as
         // OkHttp's java.net.ProtocolException ("Expected HTTP 101 response but was ...")
         // rather than ktor's WebSocketException. ProtocolException extends IOException.
