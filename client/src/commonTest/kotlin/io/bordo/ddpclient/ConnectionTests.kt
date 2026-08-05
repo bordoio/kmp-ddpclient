@@ -319,6 +319,49 @@ class ConnectionTests {
     }
 
     @Test
+    @IgnoreNative
+    fun `sendMessage delivers one result and completes`() = ddpTestApplication {
+        // THE regression: both sendMessage branches collected a StateFlow (authenticationState /
+        // connectionState), neither of which ever completes. So after the message went out the
+        // collector stayed subscribed and fired again on the next Authorized / DDPConnected --
+        // re-sending the same message and emitting a second Success. On a flaky connection that
+        // means duplicate method calls on the server.
+        //
+        // Completion is the assertion rather than a send count: without the fix the flow simply
+        // never ends, which awaitComplete() catches deterministically, whereas counting duplicate
+        // sends would depend on a second auth cycle happening to occur inside the test.
+        val pingId = "123"
+        val ddpClient = TestDDPClient { tokenRefresher = { true } }
+        ddpClient.setAuthenticationState(AuthenticationState.Authorized)
+
+        var closedOnce = false
+        testServer {
+            if (!closedOnce) {
+                send(Frame.Text("""c[1000,"Normal closure"]"""))
+                closedOnce = true
+            }
+            receive(2) {
+                if (it is Outgoing.Ping) sendSerialized(Incoming.Pong(it.id))
+            }
+        }
+
+        runTest {
+            ddpClient.initConnection().testAfterConnected {
+                // Drop the connection so sendMessage takes the reconnect-then-send branch.
+                assertIs<Incoming.Close>(awaitItem())
+                assertIs<Incoming.Exception>(awaitItem())
+
+                ddpClient.sendMessage(Outgoing.Ping(pingId)).test {
+                    assertEquals(MessageState.Success, awaitItem())
+                    awaitComplete()
+                }
+
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+    }
+
+    @Test
     fun `when connection fails with a non-allowlisted exception it should degrade to Disconnected instead of throwing`() = ddpTestApplication {
         // IllegalStateException is not in handledExceptions. Before the fix, initConnection's
         // .catch rethrew it, which escaped the collector's scope as an unhandled coroutine

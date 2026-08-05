@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `sendMessage` sent the same message more than once. Both of its branches collected a `StateFlow`
+  (`authenticationState` and `connectionState`), neither of which ever completes, so the collector
+  stayed subscribed after the message went out and fired again on the next `Authorized` /
+  `DDPConnected` — re-sending and emitting a second `MessageState.Success`. On a flaky connection
+  that meant duplicate method calls reaching the server. The returned flow now delivers one result
+  and completes.
+
 ## 0.1.0 — 2026-08-05
 
 First public release, on Maven Central as `io.bordo:ddpclient` and `io.bordo:ddpclient-ejson`.

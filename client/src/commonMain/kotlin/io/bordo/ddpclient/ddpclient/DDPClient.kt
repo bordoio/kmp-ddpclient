@@ -51,6 +51,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.takeWhile
+import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -1310,39 +1311,55 @@ class DDPClient(
                     }
                 }
                 .filterNotNull()
-                .collect { authState ->
+                // transformWhile, not collect: authenticationState is a StateFlow and never
+                // completes, so a plain collect stayed subscribed after the message went out and
+                // fired again on the next Authorized emission -- re-sending the same message and
+                // emitting a second MessageState.Success. sendMessage delivers one message and
+                // then finishes, so the collection has to stop at the first terminal outcome.
+                .transformWhile { authState ->
                     Logger.d(tag = "CONNECTION_RETRY") { "Authentication state changed ${authState}" }
                     val session = webSocketSession
 
-                    if (authState == AuthenticationState.Authorized && session != null) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Sending message 2 ${outgoing} connection state ${connectionState.value}" }
+                    when {
+                        authState == AuthenticationState.Authorized && session != null -> {
+                            Logger.d(tag = "CONNECTION_RETRY") { "Sending message 2 ${outgoing} connection state ${connectionState.value}" }
+                            session.sendSerialized(outgoing)
+                            emit(MessageState.Success)
+                            false
+                        }
+                        authState == AuthenticationState.Unauthorized -> {
+                            emit(MessageState.Failed(null)) //TODO: add exception
+                            false
+                        }
+                        // Authorizing, or Authorized before the session exists: keep waiting.
+                        else -> true
+                    }
+                }
+                .collect { emit(it) }
+        } else if (connectionState.value is ConnectionState.Connecting) {
+            // Same reason as the branch above: connectionState is a StateFlow, so collecting it
+            // outlived the send and re-sent on the next DDPConnected (after any later drop).
+            connectionState
+                .transformWhile {
+                    Logger.d(tag = "CONNECTION_RETRY") { "Sending message 3 connection state changed" }
+                    if (it is ConnectionState.Connecting) return@transformWhile true
+
+                    val connected = it is ConnectionState.DDPConnected
+
+                    val session = webSocketSession
+                    Logger.d(tag = "CONNECTION_RETRY") { "Sending message 3 session $session connection state ${connectionState.value}" }
+                    if (connected && session != null) {
+                        Logger.d(tag = "CONNECTION_RETRY") { "Sending message 3 ${outgoing} connection state ${connectionState.value}" }
                         session.sendSerialized(outgoing)
                         emit(MessageState.Success)
-                    } else if (authState == AuthenticationState.Unauthorized) {
+                    } else if (it is ConnectionState.Disconnected) {
+                        emit(MessageState.Failed(it.exception))
+                    } else {
                         emit(MessageState.Failed(null)) //TODO: add exception
                     }
-            }
-        } else if (connectionState.value is ConnectionState.Connecting) {
-            connectionState.collect {
-                Logger.d(tag = "CONNECTION_RETRY") { "Sending message 3 connection state changed" }
-                if (it is ConnectionState.Connecting) {
-                    return@collect
+                    false
                 }
-
-                val connected = it is ConnectionState.DDPConnected
-
-                val session = webSocketSession
-                Logger.d(tag = "CONNECTION_RETRY") { "Sending message 3 session $session connection state ${connectionState.value}" }
-                if (connected && session != null) {
-                    Logger.d(tag = "CONNECTION_RETRY") { "Sending message 3 ${outgoing} connection state ${connectionState.value}" }
-                    session.sendSerialized(outgoing)
-                    emit(MessageState.Success)
-                } else if (it is ConnectionState.Disconnected) {
-                    emit(MessageState.Failed(it.exception))
-                } else {
-                    emit(MessageState.Failed(null)) //TODO: add exception
-                }
-            }
+                .collect { emit(it) }
         } else {
             val session = webSocketSession
 
