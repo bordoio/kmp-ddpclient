@@ -94,11 +94,31 @@ class SubscriptionFlowTest {
     }
 
     @Test
-    fun `onEachSubscription returns the same flow so it stays chainable`() = runTest {
+    fun `onEachSubscription runs the action for every emission`() = runTest {
+        val subscription = Subscription(id = "s1", name = "users")
+        val subscribed = subscription.copy(state = SubscriptionState.Subscribed)
+        val seen = mutableListOf<SubscriptionState>()
+
+        flowOf(subscription, subscribed)
+            .asSubscriptionFlow(subscription)
+            .onEachSubscription { seen += it.state }
+            .test {
+                awaitItem(); awaitItem(); awaitComplete()
+            }
+
+        // Regression: this was `also { onEach(action) }`, which discarded the decorated flow, so
+        // `seen` stayed empty no matter how the result was collected.
+        assertEquals(listOf(SubscriptionState.Subscribing, SubscriptionState.Subscribed), seen)
+    }
+
+    @Test
+    fun `onEachSubscription keeps the subscription so it stays chainable`() = runTest {
         val subscription = Subscription(id = "s1", name = "users")
         val flow = flowOf(subscription).asSubscriptionFlow(subscription)
 
-        assertSame(flow, flow.onEachSubscription { })
+        // Identity cannot be preserved -- a working onEach must return a new flow -- but the
+        // `subscription` property is the whole reason SubscriptionFlow exists, so it must survive.
+        assertSame(subscription, flow.onEachSubscription { }.subscription)
     }
 
     // ---- combineStates ---------------------------------------------------------------------

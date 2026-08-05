@@ -50,7 +50,16 @@ fun subscriptionFlow(
 }
 
 
-fun SubscriptionFlow.onEachSubscription(action: suspend (Subscription) -> Unit) = also { onEach(action) }
+/**
+ * Runs [action] for each emitted [Subscription].
+ *
+ * Returns the decorated flow, re-wrapped so it keeps its [SubscriptionFlow.subscription] and stays
+ * chainable with [launch]. It was previously `also { onEach(action) }`, which built the decorated
+ * flow and threw it away -- `onEach` is a cold operator with no effect until collected, so the
+ * receiver came back unchanged and the action never ran.
+ */
+fun SubscriptionFlow.onEachSubscription(action: suspend (Subscription) -> Unit): SubscriptionFlow =
+    onEach(action).asSubscriptionFlow(subscription)
 
 fun SubscriptionFlow.launch(scope: CoroutineScope) = also { launchIn(scope) }
 

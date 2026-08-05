@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.2 — 2026-08-05
+
+Two APIs that never worked. Both were covered by passing tests that asserted the broken behaviour,
+which is how they survived to a public release; those tests have been rewritten.
+
+- `SubscriptionFlow.onEachSubscription` never ran its action. It was `also { onEach(action) }` —
+  `onEach` is a cold operator that builds a new flow and does nothing until collected, so the
+  decorated flow was discarded and the receiver returned unchanged. It now returns the decorated
+  flow, re-wrapped so it keeps its `subscription` and stays chainable with `launch`. The returned
+  flow is no longer the same instance, which a correct `onEach` cannot avoid.
+- `Database.dump()` threw `SerializationException` on `InMemoryDatabase` for every caller. It
+  encoded `Map<String, DbCollection>`, and `DbCollection` is an interface with no registered
+  polymorphic subclasses. It now serializes the documents as the `JsonObject` tree they already are,
+  which also means custom `DbCollection` implementations no longer need to be `@Serializable`.
+
+Neither API is used by the app this library was extracted from, so nothing else changes.
+
 ## 0.1.1 — 2026-08-05
 
 - `sendMessage` sent the same message more than once. Both of its branches collected a `StateFlow`

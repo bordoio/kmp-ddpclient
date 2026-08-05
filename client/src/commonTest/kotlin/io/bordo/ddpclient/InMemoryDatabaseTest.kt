@@ -13,8 +13,11 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -270,6 +273,26 @@ class InMemoryDatabaseTest {
         assertFailsWith<IllegalArgumentException> {
             database.getCollectionFlow("")
         }
+    }
+
+    @Test
+    fun `dump returns the documents as parseable json`() = runTest {
+        database.onDataAdded("users", "u1", jsonUser)
+        database.onDataAdded("orders", "o1", buildJsonObject { put("total", JsonPrimitive(7)) })
+
+        // Regression: dump() encoded Map<String, DbCollection>, which needs a serializer for the
+        // DbCollection interface -- it had no registered subclasses, so this threw
+        // SerializationException for every caller.
+        val dumped = json.parseToJsonElement(database.dump()).jsonObject
+
+        assertEquals("foo", dumped["users"]!!.jsonArray.single().jsonObject["name"]?.jsonPrimitive?.content)
+        assertEquals("u1", dumped["users"]!!.jsonArray.single().jsonObject["_id"]?.jsonPrimitive?.content)
+        assertEquals(7, dumped["orders"]!!.jsonArray.single().jsonObject["total"]?.jsonPrimitive?.int)
+    }
+
+    @Test
+    fun `dump of an empty database is still valid json`() {
+        assertEquals(0, json.parseToJsonElement(database.dump()).jsonObject.size)
     }
 
     private suspend fun TurbineTestContext<DbCollection>.assertEmptyCollection() {

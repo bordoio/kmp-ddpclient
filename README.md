@@ -36,7 +36,7 @@ Targets: **Android**, **iosArm64**, **iosSimulatorArm64**, **iosX64**.
 kotlin {
     sourceSets {
         commonMain.dependencies {
-            implementation("io.bordo:ddpclient:0.1.1")
+            implementation("io.bordo:ddpclient:0.1.2")
         }
     }
 }
@@ -484,13 +484,13 @@ client.subscribe("messages").collect { sub ->
 }
 ```
 
-To react to each state change without taking over collection, use the standard `onEach` before
-launching. (Do **not** use `onEachSubscription` — see [Known limitations](#known-limitations).)
+To react to each state change without taking over collection, chain `onEachSubscription` — it keeps
+the `SubscriptionFlow` type, so `launch` still works afterwards:
 
 ```kotlin
 client.subscribe("messages")
-    .onEach { sub -> log(sub.state) }
-    .launchIn(scope)
+    .onEachSubscription { sub -> log(sub.state) }
+    .launch(scope)
 ```
 
 Subscribing does **not** hand you the data — it tells the server to start streaming into your
@@ -524,6 +524,7 @@ client.db.getCollection<User>("users")      // List<User>? — decoded, null if 
 client.db.getRawCollection("users")         // JsonArray?  — undecoded
 client.db.collections                       // Map<String, DbCollection>
 client.db.collectionNames                   // List<String>
+client.db.dump()                            // pretty-printed JSON of every collection, for debugging
 ```
 
 ### Live flows
@@ -734,13 +735,6 @@ All three of these are fixable without changing the public API.
 
 ### Defects
 
-- **`SubscriptionFlow.onEachSubscription` is a no-op.** It builds an `onEach` flow and discards it,
-  returning the receiver unchanged, so the action never runs. Use `Flow.onEach` instead. Fixable in
-  one line.
-- **`Database.dump()` throws on `InMemoryDatabase`.** It serializes `Map<String, DbCollection>`, and
-  neither `DbCollection` nor `InMemoryCollection` is `@Serializable`, so the polymorphic serializer
-  lookup fails at runtime. Use `getRawCollection(name)` to inspect state instead. Fixable by making
-  the collection serializable or dumping the raw `JsonArray`s.
 - **`ERegex` drops regex flags on serialization** — it always writes an empty `$flags`. Fixable, needs
   a Kotlin `RegexOption` ↔ JavaScript flag mapping.
 - **`receiveCollection` can emit an empty snapshot after a non-empty one** in some sequences. If you

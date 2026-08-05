@@ -35,11 +35,17 @@ class InMemoryDatabase(override val json: Json) : Database {
     }
 
     override fun dump(): String {
-        val json = Json(from = defaultJson) {
+        val pretty = Json(from = defaultJson) {
             prettyPrint = true
         }
 
-        return json.encodeToString(collections)
+        // Dump the documents as the JSON tree they already are. Encoding `collections` directly
+        // asked for a serializer for the DbCollection *interface*, which has no registered
+        // subclasses, so every call threw SerializationException. Going through JsonObject also
+        // keeps dump() free of any serialization requirement on custom DbCollection types.
+        return pretty.encodeToString(
+            JsonObject(collections.mapValues { (_, collection) -> collection.documents }),
+        )
     }
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
