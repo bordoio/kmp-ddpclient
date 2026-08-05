@@ -1,5 +1,8 @@
 # ddpclient
 
+[![Maven Central](https://img.shields.io/maven-central/v/io.bordo/ddpclient)](https://central.sonatype.com/artifact/io.bordo/ddpclient)
+[![CI](https://github.com/bordoio/kmp-ddpclient/actions/workflows/ci.yml/badge.svg)](https://github.com/bordoio/kmp-ddpclient/actions/workflows/ci.yml)
+
 A Kotlin Multiplatform client for [Meteor](https://www.meteor.com/)'s DDP protocol over SockJS
 websockets: connection management with reconnect, subscriptions backed by an in-memory minimongo
 mirror, and method calls exposed as coroutine `Flow`s.
@@ -13,7 +16,7 @@ Targets: **Android**, **iosArm64**, **iosSimulatorArm64**, **iosX64**.
 kotlin {
     sourceSets {
         commonMain.dependencies {
-            implementation("io.bordo:ddpclient:0.1.0")
+            implementation("io.bordo:ddpclient:0.1.1")
         }
     }
 }
