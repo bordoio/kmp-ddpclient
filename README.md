@@ -20,6 +20,7 @@ Targets: **Android**, **iosArm64**, **iosSimulatorArm64**, **iosX64**.
 - [Keepalive (ping/pong)](#keepalive-pingpong)
 - [Authentication](#authentication)
 - [Method calls](#method-calls)
+  - [Predictable ids (`randomSeed`)](#predictable-ids-randomseed)
 - [Subscriptions](#subscriptions)
 - [Collections](#collections)
 - [Implementing your own Database](#implementing-your-own-database)
@@ -104,26 +105,57 @@ DDPClient ──── Outgoing ──► DDPMessageConverter ──► SockJS f
 and then wrapped in a JSON array (SockJS's format). Incoming frames are dispatched by their first
 character — `o` open, `c` close, `h` heartbeat, `m` message, `a[...]` a batch of DDP payloads — and
 the payload is then decoded to a concrete `Incoming` subtype by its `msg` field. An unrecognised
-`msg` throws, which surfaces as a connection error rather than silent data loss.
+`msg` throws — note this is fatal to the connection rather than ignored, which is a spec-compliance
+problem for the message types listed under [Protocol coverage](#protocol-coverage).
 
 **Receive loop.** `initConnection()` opens the session and runs `receiveAll`, a loop that reads
 frames until the channel closes. For each message it calls `handleIncoming`, which is the entire
 protocol state machine:
 
-| Incoming | Effect |
-|---|---|
-| `Open` | Sends `connect` with the negotiated DDP version |
-| `Connected` | Stores `sessionId`, sets state `DDPConnected`, resets the retry budget, starts keepalive, refreshes the token, and re-subscribes (reconnects only) |
-| `Failed` | Server rejected the version; adopts the server's version if supported, otherwise throws |
-| `Ping` | Replies `pong` |
-| `Pong` | Resolves the matching pong listener |
-| `Added` / `Changed` / `Removed` | Applied to the `Database` |
-| `Ready` | Resolves the matching subscription listeners |
-| `NoSub` | Subscription failed or was cancelled; routes to the subscription's error/retry path |
-| `Result` | Resolves the matching method listener |
-| `Updated` | Signals that the method's writes are visible; emits `MethodState.Updated` |
-| `Close` | Closes the connection, then re-raises so the retry machinery reconnects |
-| `Error`, `Heartbeat`, `Message` | Ignored |
+| Incoming | Layer | Effect |
+|---|---|---|
+| `Open` | SockJS | Sends DDP `connect` with the negotiated version |
+| `Close` | SockJS | Closes the connection, then re-raises so the retry machinery reconnects |
+| `Heartbeat` | SockJS | Ignored |
+| `Message` | SockJS | Ignored |
+| `Connected` | DDP | Stores `sessionId`, sets state `DDPConnected`, resets the retry budget, starts keepalive, refreshes the token, and re-subscribes (reconnects only) |
+| `Failed` | DDP | Server rejected the version; adopts the server's version if supported, otherwise throws |
+| `Ping` | DDP | Replies `pong`, echoing the `id` if present |
+| `Pong` | DDP | Resolves the matching pong listener |
+| `Added` / `Changed` / `Removed` | DDP | Applied to the `Database` |
+| `Ready` | DDP | Resolves the matching subscription listeners |
+| `NoSub` | DDP | Subscription failed or was cancelled; routes to the subscription's error/retry path |
+| `Result` | DDP | Resolves the matching method listener |
+| `Updated` | DDP | Signals that the method's writes are visible; emits `MethodState.Updated` |
+| `Error` | DDP | Ignored |
+| `Exception` | internal | Not a wire message — see below |
+
+### Protocol coverage
+
+`Incoming` mixes three layers, which is worth knowing before you `when`-match on it. Measured
+against the [DDP specification](https://github.com/meteor/meteor/blob/devel/packages/ddp/DDP.md):
+
+**Genuine DDP messages** — `Connected`, `Failed`, `Ping`, `Pong`, `Added`, `Changed`, `Removed`,
+`Ready`, `NoSub`, `Result`, `Updated`, `Error`. All spec-defined, with spec field names.
+
+**SockJS transport frames, not DDP** — `Open`, `Close`, `Heartbeat`, `Message`. These come from the
+SockJS envelope (`o`, `c`, `h`, `m` prefixes), not from DDP, and their `msg` strings (`"open"`,
+`"close"`, …) are this library's invention. A DDP implementation over a raw websocket would not have
+them.
+
+**Not a message at all** — `Incoming.Exception(exception: Throwable)`. This is a client-internal
+signal for transport failures, injected by the connection flow so callers see errors on the same
+stream. It is the only `Incoming` subtype that is not `@Serializable`, it never appears on the wire,
+and its `msg` value `"exception"` is not a DDP message type. Do not treat it as one.
+
+**Spec messages this client does not implement** — `addedBefore` and `movedBefore`, the ordered-
+collection messages a server sends when a publication uses an ordered observe. The converter throws
+`IllegalStateException` on any unrecognised `msg`, and because that type is not in the handled-
+exception set the connection degrades straight to `Disconnected` without retrying. If your server
+publishes ordered collections, this client cannot talk to it. See
+[Known limitations](#known-limitations).
+
+`randomSeed` is implemented and matches Meteor's algorithm — see [Predictable ids](#predictable-ids-randomseed).
 
 Every message is also republished on `client.ddpMessages`, a `SharedFlow<Incoming>` you can observe
 for logging or diagnostics. It is buffered (64) and drops oldest under pressure, so a slow collector
@@ -336,8 +368,7 @@ fun <reified T : Any> call(
 ```
 
 `T` is deserialized from the DDP `result` field using the configured `json`. Use
-`JsonElement` for `T` if you want the raw payload. `randomSeed` is the Meteor latency-compensation
-seed; pass one if the server method generates ids you want to predict.
+`JsonElement` for `T` if you want the raw payload. For `randomSeed`, see below.
 
 `MethodState<T>` is a sealed hierarchy:
 
@@ -378,6 +409,55 @@ client.call<Session>("login")
 
 `transformNotNull` and `flatMapLatestMethodState` throw if `Success` carries a `null` response — use
 `transform` when the method can legitimately return nothing.
+
+### Predictable ids (`randomSeed`)
+
+The DDP spec says of `randomSeed`:
+
+> By using the same seed with the same algorithm, the same pseudo-random values can be generated on
+> the client and the server. In particular, this is used for generating ids for newly created
+> documents.
+
+"The same algorithm" is the operative phrase — the seed is only useful if both sides run *bit-identical*
+PRNGs. `io.bordo.ddpclient.random.MeteorRandom` is a 1:1 port of Meteor's `random` package: the
+[Alea](http://baagoe.org/en/wiki/Better_random_numbers_for_javascript) generator and its `Mash` seed
+hash, including the `>>> 0` (`ToUint32`) truncation at each step, Meteor's 54-character
+`UNMISTAKABLE_CHARS` alphabet, and its 17-character default id length. The arithmetic is deliberately
+un-simplified — "cleaning it up" would silently desynchronise it from the server.
+
+This lets you do optimistic inserts: predict the `_id` the server will assign *before* the method
+round-trips, render the document immediately, and have the server's eventual `added` be a no-op
+rather than a duplicate.
+
+```kotlin
+val seed = MeteorRandom.newSeed()                                // 20 hex chars, like Meteor
+val predictedId = MeteorRandom.predictDocumentId(seed, "messages")
+
+renderOptimistically(Message(_id = predictedId, text = text))    // instant UI
+
+client.call<Unit>("messages.insert", params, randomSeed = seed).collect { … }
+```
+
+`predictDocumentId` mirrors Meteor's scoping exactly: the server seeds its generator with
+`[randomSeed, "/collection/<name>"]` and draws the id as the first value from that stream, so the
+prediction holds as long as the method's first action on that collection is the insert. A method that
+draws other random values first, or inserts into several collections, will diverge — the sequence is
+positional.
+
+The full generator is public if you need more than ids:
+
+```kotlin
+val gen = MeteorRandom.createWithSeeds(seed, "/collection/messages")  // deterministic
+gen.id()            // 17 chars of UNMISTAKABLE_CHARS
+gen.hexString(20)
+gen.secret()        // 43 base64 chars
+gen.fraction()
+
+MeteorRandom.insecure()   // non-deterministic, backed by kotlin.random.Random
+```
+
+Alea is **not** cryptographically strong — matching Meteor is the point, not unpredictability. Do not
+use it for tokens.
 
 ## Subscriptions
 
@@ -633,21 +713,45 @@ Use `--rerun-tasks` when comparing runs: Gradle's up-to-date checks will otherwi
 
 ## Known limitations
 
+### Spec compliance
+
+Verified against the [DDP specification](https://github.com/meteor/meteor/blob/devel/packages/ddp/DDP.md).
+All three of these are fixable without changing the public API.
+
+- **`addedBefore` and `movedBefore` are not implemented.** A server publishing an ordered collection
+  sends these, the converter throws `IllegalStateException` on the unrecognised `msg`, and since that
+  type is not in the handled-exception set the client goes to `Disconnected` *without retrying*. An
+  unknown message type should be ignored rather than fatal, independently of whether the ordered
+  messages themselves get support.
+- **`added` requires `fields`, but the spec makes it optional.** `Incoming.Added.fields` is a
+  non-nullable `JsonObject` with no default, so a spec-legal `{"msg":"added","collection":…,"id":…}`
+  fails to deserialize with `MissingFieldException` and kills the connection. (`changed` is correct —
+  its `fields` is nullable.)
+- **`ResponseError` requires `reason`, `message` and `errorType`, but the spec requires only `error`.**
+  A minimal server error such as `{"error":"not-found"}` throws `MissingFieldException`, so the error
+  never reaches your `unauthorizedChecker` or your `MethodState.Error`. The spec also notes `error`
+  was historically a number; a numeric `error` fails here too.
+
+### Defects
+
+- **`SubscriptionFlow.onEachSubscription` is a no-op.** It builds an `onEach` flow and discards it,
+  returning the receiver unchanged, so the action never runs. Use `Flow.onEach` instead. Fixable in
+  one line.
+- **`Database.dump()` throws on `InMemoryDatabase`.** It serializes `Map<String, DbCollection>`, and
+  neither `DbCollection` nor `InMemoryCollection` is `@Serializable`, so the polymorphic serializer
+  lookup fails at runtime. Use `getRawCollection(name)` to inspect state instead. Fixable by making
+  the collection serializable or dumping the raw `JsonArray`s.
+- **`ERegex` drops regex flags on serialization** — it always writes an empty `$flags`. Fixable, needs
+  a Kotlin `RegexOption` ↔ JavaScript flag mapping.
+- **`receiveCollection` can emit an empty snapshot after a non-empty one** in some sequences. If you
+  render directly off it, guard against a spurious empty list. Not yet root-caused.
+
+### Scope
+
 - **No JVM target.** Needs `actual`s for the HTTP engine, platform exceptions, and UUID. Non-breaking
   to add.
 - **No Swift Package.** `DDPClient.call<T>()` is `inline` + `reified` and cannot be exported to
   Objective-C, so a usable Swift API needs non-reified overloads first.
-- **`ERegex` drops regex flags on serialization.**
-- **`receiveCollection` can emit an empty snapshot after a non-empty one** in some sequences. If you
-  render directly off it, guard against a spurious empty list.
-- **`SubscriptionFlow.onEachSubscription` is a no-op.** It builds an `onEach` flow and discards it,
-  returning the receiver unchanged, so the action never runs. Use `Flow.onEach` instead. Kept for
-  source compatibility; will be fixed or removed in a future release.
-- **`Database.dump()` throws on `InMemoryDatabase`.** It serializes `Map<String, DbCollection>`, and
-  neither `DbCollection` nor `InMemoryCollection` is `@Serializable`, so the polymorphic serializer
-  lookup fails at runtime. Use `getRawCollection(name)` to inspect state instead.
-- **Fixed reconnect delay**, no exponential backoff.
-- **`BURST_SETTLE_MILLIS` is not configurable** per collection.
 
 ## License
 
