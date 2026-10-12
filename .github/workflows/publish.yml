@@ -19,6 +19,9 @@ jobs:
           java-version: 17
 
       - uses: android-actions/setup-android@v3
+        with:
+          # The default also installs the legacy 'tools' package, which sdkmanager no longer serves.
+          packages: 'platform-tools'
 
       - uses: gradle/actions/setup-gradle@v4
 

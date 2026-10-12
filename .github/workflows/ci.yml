@@ -25,6 +25,9 @@ jobs:
 
       # The arm64 macOS runner images do not ship the Android SDK, and the Android target needs it.
       - uses: android-actions/setup-android@v3
+        with:
+          # The default also installs the legacy 'tools' package, which sdkmanager no longer serves.
+          packages: 'platform-tools'
 
       - uses: gradle/actions/setup-gradle@v4
 
