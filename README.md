@@ -36,7 +36,7 @@ Targets: **Android**, **JVM**, **iosArm64**, **iosSimulatorArm64**, **iosX64**.
 kotlin {
     sourceSets {
         commonMain.dependencies {
-            implementation("io.bordo:ddpclient:0.2.0")
+            implementation("io.bordo:ddpclient:0.3.0")
         }
     }
 }

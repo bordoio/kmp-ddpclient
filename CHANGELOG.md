@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-10-12
 
 - **DDP frames and connection logs are now Verbose and hidden by default.** Every sent and received
   frame used to be logged at Info, including login passwords, resume tokens and all subscription
