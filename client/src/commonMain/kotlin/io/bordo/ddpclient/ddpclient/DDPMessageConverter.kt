@@ -18,6 +18,7 @@ import kotlin.time.Clock
  */
 class DDPMessageConverter(
     private val json: Json,
+    private val logger: Logger,
 ) : WebsocketContentConverter {
 
     override suspend fun serialize(
@@ -28,7 +29,7 @@ class DDPMessageConverter(
         if (value !is Outgoing) return Frame.Text("")
         val message = encodeToDDPMessage(value)
 
-        Logger.i(tag = "DDPClient") { "Client is sending message: $message time: ${Clock.System.now()}" }
+        logger.v { "Client is sending message: $message time: ${Clock.System.now()}" }
         return Frame.Text(message)
     }
 
@@ -42,7 +43,7 @@ class DDPMessageConverter(
 
         val message = content.readText()
 
-        Logger.i(tag = "DDPClient") { "Client received message: $message  time: ${Clock.System.now()}" }
+        logger.v { "Client received message: $message  time: ${Clock.System.now()}" }
 
         if (message.startsWith("o")) return Incoming.Open
         if (message.startsWith("c")) return Incoming.Close
@@ -58,7 +59,7 @@ class DDPMessageConverter(
         val jsonObject = try {
             json.parseToJsonElement(jsonString).jsonObject
         } catch (e: Exception) {
-            Logger.e(tag = "DDPClient") { "Cannot parse $jsonString" }
+            logger.v { "Cannot parse $jsonString" }
             Logger.e(tag = "DDPClient", throwable = e, messageString = "Exception" )
             throw e
         }

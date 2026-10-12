@@ -189,6 +189,7 @@ val client = DDPClient(host = "example.meteor.app") { /* DDPClientConfig */ }
 | `pingPongEnabled` | `Boolean` | `true` | Whether to run the keepalive loop. |
 | `pingPongInterval` | `Long` (ms) | `30_000` | Gap between pings. |
 | `pingPongTimeout` | `Long` (ms) | `15_000` | How long to wait for a pong before declaring the socket dead and restarting. |
+| `minLogSeverity` | `Severity` (Kermit) | `Debug` | Minimum severity for the client's own logs, which go to Kermit's global log writers. Full DDP frames and connection/retry diagnostics are logged at `Verbose`, so the default hides them: frames carry credentials (login password, resume tokens) and user data. Set `Verbose` in debug builds only. Errors reported as non-fatals still go through the global `Logger`. |
 | `tokenRefresher` | `suspend () -> Boolean` | `{ true }` | Re-authenticate. See [Authentication](#authentication). |
 | `unauthorizedChecker` | `(String, JsonArray?, ResponseError) -> Boolean` | `{ _, _, _ -> false }` | Decides whether an error means "token expired". |
 

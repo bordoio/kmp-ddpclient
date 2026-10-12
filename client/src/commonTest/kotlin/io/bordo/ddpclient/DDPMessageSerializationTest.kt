@@ -1,5 +1,6 @@
 package io.bordo.ddpclient
 
+import co.touchlab.kermit.Logger
 import io.bordo.ddpclient.ddpclient.DDPMessageConverter
 import io.bordo.ddpclient.ddpclient.Incoming
 import io.bordo.ddpclient.ddpclient.Outgoing
@@ -30,7 +31,7 @@ import kotlin.test.assertTrue
  */
 class DDPMessageSerializationTest {
 
-    private val converter = DDPMessageConverter(defaultJson)
+    private val converter = DDPMessageConverter(defaultJson, Logger)
 
     private suspend fun serialize(value: Outgoing): String {
         val frame = converter.serialize(Charsets.UTF_8, typeInfo<Outgoing>(), value)

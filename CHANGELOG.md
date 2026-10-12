@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **DDP frames and connection logs are now Verbose and hidden by default.** Every sent and received
+  frame used to be logged at Info, including login passwords, resume tokens and all subscription
+  data, so with a crash-reporter log writer (e.g. Kermit's `CrashlyticsLogWriter`, Info and above)
+  credentials ended up in crash reports. Frames, the `Sending message` lines (which print method
+  params) and the connection/retry diagnostics are now logged at `Verbose` through a per-client
+  logger, and the new `DDPClientConfig.minLogSeverity` (default `Debug`) filters them out. Set it to
+  `Severity.Verbose` in debug builds to get them back; it is also mutable on the client at runtime.
+  Non-fatal error reports still go through the global `Logger`, unchanged.
+
+  **Breaking:** three public signatures take the client's logger: `DDPMessageConverter(json, logger)`,
+  `DDPClientConfig.getClient(httpClient, logger)` and `DefaultClientWebSocketSession.receiveAll(logger) { … }`.
+
 ## 0.2.0 — 2026-08-05
 
 - **Added a JVM target.** Targets are now Android, JVM, iosArm64, iosSimulatorArm64 and iosX64,

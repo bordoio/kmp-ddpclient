@@ -1,6 +1,8 @@
 package io.bordo.ddpclient.ddpclient
 
 import co.touchlab.kermit.Logger
+import co.touchlab.kermit.LoggerConfig
+import co.touchlab.kermit.Severity
 import co.touchlab.stately.collections.ConcurrentMutableMap
 import io.bordo.ddpclient.db.Database
 import io.bordo.ddpclient.db.memory.InMemoryDatabase
@@ -100,9 +102,10 @@ private fun Throwable.isHandled(): Boolean {
 
 private fun HttpClientConfig<*>.defaultConfig(
     json: Json,
+    logger: Logger,
 ) {
     install(WebSockets) {
-        contentConverter = DDPMessageConverter(json)
+        contentConverter = DDPMessageConverter(json, logger)
     }
 }
 
@@ -120,12 +123,15 @@ class DDPClientConfig {
     var pingPongInterval: Long = DEFAULT_PING_PONG_INTERVAL
     var pingPongTimeout: Long = DEFAULT_PING_PONG_TIMEOUT
     var pingPongEnabled: Boolean = true
+    // DDP frames (credentials, user data) and connection/retry diagnostics are logged at Verbose,
+    // so the default leaves them out.
+    var minLogSeverity: Severity = Severity.Debug
     var tokenRefresher: suspend () -> Boolean = { true }
     var unauthorizedChecker: (String, JsonArray?, ResponseError) -> Boolean = { _, _, _ -> false }
 
-    fun getClient(httpClient: HttpClient): HttpClient {
+    fun getClient(httpClient: HttpClient, logger: Logger): HttpClient {
         return httpClient.config {
-            defaultConfig(json)
+            defaultConfig(json, logger)
             httpClientConfig()
         }
     }
@@ -182,6 +188,18 @@ class DDPClient(
     var pingPongInterval = config.pingPongInterval
     var pingPongTimeout = config.pingPongTimeout
     var pingPongEnabled = config.pingPongEnabled
+    var minLogSeverity = config.minLogSeverity
+
+    // Writes through the app's global log writers, filtered by this client's minLogSeverity.
+    // @PublishedApi: the public reified call/subscribe helpers log through it.
+    @PublishedApi
+    internal val logger = Logger(
+        config = object : LoggerConfig {
+            override val minSeverity get() = minLogSeverity
+            override val logWriterList get() = Logger.config.logWriterList
+        },
+        tag = "DDPClient",
+    )
 
     // Consecutive failed reconnects since the last successful Incoming.Connected. retryWhen's own
     // `attempt` is monotonic for the whole flow lifetime, so it treated maxReconnectAttempts as a
@@ -191,7 +209,7 @@ class DDPClient(
     // Reset to 0 on every successful connect (see the receive loop) so the budget is per outage.
     private var connectionRetryCount = 0
     
-    val httpClient: HttpClient by lazy { config.getClient(clientFactory(config.httpClientConfig)) }
+    val httpClient: HttpClient by lazy { config.getClient(clientFactory(config.httpClientConfig), logger) }
 
     var webSocketSession: DefaultClientWebSocketSession? = null
     var sessionId: String? = null
@@ -249,12 +267,12 @@ class DDPClient(
     fun initConnection(): Flow<Incoming> = restartChannel
         .consumeAsFlow()
         .flatMapLatest {
-            Logger.d(tag = "CONNECTION_RETRY") { "Restarting connection 1" }
+            logger.v(tag = "CONNECTION_RETRY") { "Restarting connection 1" }
             _connectionState.update {
                 ConnectionState.Connecting(null)
             }
             flow {
-                Logger.d(tag = "CONNECTION_RETRY") { "Starting webSocket connection" }
+                logger.v(tag = "CONNECTION_RETRY") { "Starting webSocket connection" }
                 try {
                     // webSocketSession (not webSocket(block)) so receiveAll runs in this flow
                     // collector's coroutine: ktor 3 runs webSocket's block inside the call's
@@ -268,10 +286,10 @@ class DDPClient(
                         url.port = protocol.defaultPort
                     }
                     with(session) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "WebSocket connected, starting receiveAll" }
+                        logger.v(tag = "CONNECTION_RETRY") { "WebSocket connected, starting receiveAll" }
                         webSocketSession = this
                         try {
-                            receiveAll {
+                            receiveAll(logger) {
                                 val closed = handleIncoming(it)
                                 emit(it)
                                 // Emit first, then end the connection, so collectors actually
@@ -296,7 +314,7 @@ class DDPClient(
                                     hasConnectedBefore = true
                                     if (pingPongEnabled) {
                                         launch {
-                                            Logger.d(tag = "CONNECTION_RETRY") { "Starting ping pong" }
+                                            logger.v(tag = "CONNECTION_RETRY") { "Starting ping pong" }
                                             startPingPong()
                                         }
                                     }
@@ -317,7 +335,7 @@ class DDPClient(
                                         } catch (e: CancellationException) {
                                             throw e
                                         } catch (e: Exception) {
-                                            Logger.d(tag = "CONNECTION_RETRY") {
+                                            logger.v(tag = "CONNECTION_RETRY") {
                                                 "refreshToken/resubscribe failed: ${e::class.simpleName} - ${e.message}"
                                             }
                                         }
@@ -325,10 +343,10 @@ class DDPClient(
                                 }
                             }
                         } catch (e: Exception) {
-                            Logger.d(tag = "CONNECTION_RETRY") { "receiveAll threw exception: ${e::class.simpleName} - ${e.message}" }
+                            logger.v(tag = "CONNECTION_RETRY") { "receiveAll threw exception: ${e::class.simpleName} - ${e.message}" }
                             throw e
                         } finally {
-                            Logger.d(tag = "CONNECTION_RETRY") { "receiveAll finished/cancelled" }
+                            logger.v(tag = "CONNECTION_RETRY") { "receiveAll finished/cancelled" }
                             // The session is not a child of this collector (webSocketSession runs
                             // it on the client's scope), so it must be torn down explicitly when
                             // the flow is cancelled or restarted by flatMapLatest.
@@ -336,7 +354,7 @@ class DDPClient(
                         }
                     }
                 } catch (e: Exception) {
-                    Logger.d(tag = "CONNECTION_RETRY") { "webSocket threw exception: ${e::class.simpleName} - ${e.message}" }
+                    logger.v(tag = "CONNECTION_RETRY") { "webSocket threw exception: ${e::class.simpleName} - ${e.message}" }
                     throw e
                 }
 
@@ -351,7 +369,7 @@ class DDPClient(
                 if (shouldRetry) {
                     val firstRetry = connectionRetryCount == 0
                     connectionRetryCount++
-                    Logger.d(tag = "CONNECTION_RETRY") { "update connection state to connecting (retry $connectionRetryCount)" }
+                    logger.v(tag = "CONNECTION_RETRY") { "update connection state to connecting (retry $connectionRetryCount)" }
                     _connectionState.update {
                         ConnectionState.Connecting(cause)
                     }
@@ -382,7 +400,7 @@ class DDPClient(
                     _connectionState.update {
                         ConnectionState.Disconnected(exception as? Exception ?: RuntimeException(exception))
                     }
-                    Logger.d(tag = "CONNECTION_RETRY") { "* Exception, closing connection $exception" }
+                    logger.v(tag = "CONNECTION_RETRY") { "* Exception, closing connection $exception" }
                     closeConnection()
                 }
             }
@@ -393,7 +411,7 @@ class DDPClient(
         .distinctUntilChanged()
 
     suspend fun CoroutineScope.refreshToken() {
-        Logger.d(tag = "DDP_AUTH") { "Manual token refresh called authenticationState: ${authenticationState.value}" }
+        logger.v(tag = "DDP_AUTH") { "Manual token refresh called authenticationState: ${authenticationState.value}" }
         // compareAndSet, not read-then-setAuthenticationState: the Authorized check and the flip to
         // Authorizing have to be one atomic step. When several in-flight calls get `unauthorized` at
         // once they all enter here concurrently, and with a separate read+write every one of them
@@ -422,10 +440,10 @@ class DDPClient(
                 }.await()
 
                 newState = if (success) {
-                    Logger.d(tag = "DDP_AUTH") { "Automatic token refresh succeeded new state Authorized" }
+                    logger.v(tag = "DDP_AUTH") { "Automatic token refresh succeeded new state Authorized" }
                     AuthenticationState.Authorized
                 } else {
-                    Logger.d(tag = "DDP_AUTH") { "Automatic token refresh failed new state Unauthorized" }
+                    logger.v(tag = "DDP_AUTH") { "Automatic token refresh failed new state Unauthorized" }
                     AuthenticationState.Unauthorized
                 }
             } finally {
@@ -435,7 +453,7 @@ class DDPClient(
     }
 
     suspend fun restartConnection(): StateFlow<ConnectionState> {
-        Logger.d(tag = "CONNECTION_RETRY") { "Restarting connection function connection state ${_connectionState.value}" }
+        logger.v(tag = "CONNECTION_RETRY") { "Restarting connection function connection state ${_connectionState.value}" }
         if (_connectionState.value != ConnectionState.Paused) {
             _connectionState.update {
                 ConnectionState.Connecting(null)
@@ -452,7 +470,7 @@ class DDPClient(
         val isPaused = _connectionState.value == ConnectionState.Paused
         val isDisconnected = _connectionState.value is ConnectionState.Disconnected
         if (isPaused || isDisconnected) {
-            Logger.d(tag = "CONNECTION_RETRY") { "Resume connection function connection state ${_connectionState.value}" }
+            logger.v(tag = "CONNECTION_RETRY") { "Resume connection function connection state ${_connectionState.value}" }
             _connectionState.update {
                 ConnectionState.Connecting(null)
             }
@@ -479,7 +497,7 @@ class DDPClient(
     }
 
     suspend fun closeConnection(paused: Boolean = false) {
-        Logger.d(tag = "CONNECTION_RETRY") { "Closing connection $paused" }
+        logger.v(tag = "CONNECTION_RETRY") { "Closing connection $paused" }
         val exception = if (paused) {
             ClosedReceiveChannelException("Connection paused")
         } else {
@@ -505,7 +523,7 @@ class DDPClient(
         val isNotDisconnected = _connectionState.value !is ConnectionState.Disconnected
         if (isNotDisconnected) {
             val newState = if (paused) ConnectionState.Paused else ConnectionState.NotConnected
-            Logger.d(tag = "CONNECTION_RETRY") { "Update connection state to $newState" }
+            logger.v(tag = "CONNECTION_RETRY") { "Update connection state to $newState" }
             _connectionState.update {
                 newState
             }
@@ -513,7 +531,7 @@ class DDPClient(
     }
 
     suspend fun pauseConnection() {
-        Logger.d(tag = "CONNECTION_RETRY") { "Pause connection function connection state ${_connectionState.value}" }
+        logger.v(tag = "CONNECTION_RETRY") { "Pause connection function connection state ${_connectionState.value}" }
         _connectionState.update {
             ConnectionState.Paused
         }
@@ -521,7 +539,7 @@ class DDPClient(
     }
 
     private suspend fun startPingPong() {
-        Logger.d(tag = "CONNECTION_RETRY") { "Starting ping pong ${connectionState.value}" }
+        logger.v(tag = "CONNECTION_RETRY") { "Starting ping pong ${connectionState.value}" }
         try {
             while (connectionState.value == ConnectionState.DDPConnected) {
                 val id = randomUUID()
@@ -535,7 +553,7 @@ class DDPClient(
 
                 val session = webSocketSession
 
-                Logger.d(tag = "CONNECTION_RETRY") { "Trying to Ping session $session" }
+                logger.v(tag = "CONNECTION_RETRY") { "Trying to Ping session $session" }
                 if (session != null) {
                     session.sendSerialized(Outgoing.Ping(id))
 
@@ -548,7 +566,7 @@ class DDPClient(
                     }
 
                     if (pongReceived == null) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Pong not received in $pingPongTimeout ms" }
+                        logger.v(tag = "CONNECTION_RETRY") { "Pong not received in $pingPongTimeout ms" }
                         restartConnection()
                     }
                 }
@@ -556,9 +574,9 @@ class DDPClient(
                 delay(pingPongInterval) // Wait for interval before sending the next ping
             }
 
-            Logger.d(tag = "CONNECTION_RETRY") { "Ping loop exited normally, state: ${connectionState.value}" }
+            logger.v(tag = "CONNECTION_RETRY") { "Ping loop exited normally, state: ${connectionState.value}" }
         } catch (e: CancellationException) {
-            Logger.d(tag = "CONNECTION_RETRY") { "Ping pong cancelled: ${e.message}, state: ${connectionState.value}" }
+            logger.v(tag = "CONNECTION_RETRY") { "Ping pong cancelled: ${e.message}, state: ${connectionState.value}" }
             throw e
         } catch (e: Exception) {
             // startPingPong runs in a launch{} whose failure bypasses the connection flow's
@@ -567,14 +585,14 @@ class DDPClient(
             // race, where sendSerialized hits an already-closed socket). The keepalive is
             // best-effort: stop pinging and let the receive loop / retry machinery reconnect,
             // rather than make a dead socket fatal.
-            Logger.d(tag = "CONNECTION_RETRY") { "Ping pong exception (stopping keepalive): ${e::class.simpleName} - ${e.message}" }
+            logger.v(tag = "CONNECTION_RETRY") { "Ping pong exception (stopping keepalive): ${e::class.simpleName} - ${e.message}" }
         } finally {
-            Logger.d(tag = "CONNECTION_RETRY") { "Exit from ping pong finally block, state: ${connectionState.value}" }
+            logger.v(tag = "CONNECTION_RETRY") { "Exit from ping pong finally block, state: ${connectionState.value}" }
         }
     }
 
     fun setAuthenticationState(authenticationState: AuthenticationState) {
-        Logger.d(tag = "CONNECTION_RETRY") { "Updating authentication state to $authenticationState" }
+        logger.v(tag = "CONNECTION_RETRY") { "Updating authentication state to $authenticationState" }
         _authenticationState.update {
             authenticationState
         }
@@ -612,7 +630,7 @@ class DDPClient(
         sendMessageAndHandleResult(subscription.subscriptionMessage)
 
         awaitClose {
-            Logger.d(tag = "CONNECTION_RETRY") { "awaitClose: Closing subscription for ${subscription.id}" }
+            logger.v(tag = "CONNECTION_RETRY") { "awaitClose: Closing subscription for ${subscription.id}" }
             tokenRefresherJob?.cancel()
             subscriptionResultListeners.remove(subscription.id)
         }
@@ -647,7 +665,7 @@ class DDPClient(
         }
 
         override suspend fun onNoSub(responseMessage: Incoming.NoSub) {
-            Logger.d(tag = "CONNECTION_RETRY") { "onNoSub: $responseMessage" }
+            logger.v(tag = "CONNECTION_RETRY") { "onNoSub: $responseMessage" }
             subState.update { it.copy(cancelSendingSuccess = true) }
 
             val state = subState.value
@@ -656,7 +674,7 @@ class DDPClient(
                     && !state.resent
                     && !state.finished
 
-            Logger.d(tag = "CONNECTION_RETRY") { "shouldRetry: $shouldRetry state: $state responseMessage $responseMessage" }
+            logger.v(tag = "CONNECTION_RETRY") { "shouldRetry: $shouldRetry state: $state responseMessage $responseMessage" }
 
             if (shouldRetry) {
                 handleSubscriptionRetry(
@@ -679,7 +697,7 @@ class DDPClient(
             val job = launch {
                 refreshToken()
                 authenticationState.collect { authState ->
-                    Logger.d(tag = "CONNECTION_RETRY") { "handleSubscriptionRetry: $authState ${subState.value}" }
+                    logger.v(tag = "CONNECTION_RETRY") { "handleSubscriptionRetry: $authState ${subState.value}" }
                     val currentState = subState.value
                     if (currentState.finished) return@collect
 
@@ -836,7 +854,7 @@ class DDPClient(
             try {
                 sendMessageAndHandleResult<T>(methodMessage, callState)
             } catch (e: Exception) {
-                Logger.d(tag = "CONNECTION_RETRY") { "Exception in call function: ${e.message}" }
+                logger.v(tag = "CONNECTION_RETRY") { "Exception in call function: ${e.message}" }
                 // Call onException for any uncaught exceptions
                 methodResultListeners[id]?.onException(e)
             }
@@ -872,7 +890,7 @@ class DDPClient(
             }
 
             override suspend fun onException(exception: Exception) {
-                Logger.d(tag = "CONNECTION_RETRY") { "Exception occurred: ${exception.message}" }
+                logger.v(tag = "CONNECTION_RETRY") { "Exception occurred: ${exception.message}" }
 
                 val currentState = callState.value
                 val retryCount = if (currentState is CallState.Resending) {
@@ -881,12 +899,12 @@ class DDPClient(
                     1
                 }
 
-                Logger.d(tag = "CONNECTION_RETRY") { "Exception for method ${methodMessage.method}, retry count: $retryCount" }
+                logger.v(tag = "CONNECTION_RETRY") { "Exception for method ${methodMessage.method}, retry count: $retryCount" }
 
                 // Only retry once on exception
                 if (retryCount >= 2) {
                     if (callState.value != CallState.Finished) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Exception for method ${methodMessage.method}, retry count: $retryCount setting state to finished" }
+                        logger.v(tag = "CONNECTION_RETRY") { "Exception for method ${methodMessage.method}, retry count: $retryCount setting state to finished" }
                         send(MethodState.Exception(exception))
                         callState.value = CallState.Finished
                         close()
@@ -899,14 +917,14 @@ class DDPClient(
 
                 // Check current connection state before trying to ping
                 val currentConnectionState = connectionState.value
-                Logger.d(tag = "CONNECTION_RETRY") { "Current connection state before check: $currentConnectionState" }
+                logger.v(tag = "CONNECTION_RETRY") { "Current connection state before check: $currentConnectionState" }
 
                 // If already disconnected or connecting, skip ping check and just reconnect
                 if (currentConnectionState is ConnectionState.Disconnected ||
                     currentConnectionState is ConnectionState.Connecting ||
                     currentConnectionState == ConnectionState.NotConnected ||
                     currentConnectionState == ConnectionState.Paused) {
-                    Logger.d(tag = "CONNECTION_RETRY") { "Connection state indicates disconnection, skipping ping check" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Connection state indicates disconnection, skipping ping check" }
 
                     // Paused must be resumed here; restartConnection() is a no-op while Paused,
                     // which would leave this call hanging until timeout. reconnect() resumes instead.
@@ -918,14 +936,14 @@ class DDPClient(
                     } ?: false
 
                     if (!reconnected) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Failed to reconnect within timeout for method ${methodMessage.method} setting state to finished" }
+                        logger.v(tag = "CONNECTION_RETRY") { "Failed to reconnect within timeout for method ${methodMessage.method} setting state to finished" }
                         send(MethodState.Exception(exception))
                         callState.value = CallState.Finished
                         close()
                         return
                     }
 
-                    Logger.d(tag = "CONNECTION_RETRY") { "Reconnected after exception, retrying method ${methodMessage.method}" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Reconnected after exception, retrying method ${methodMessage.method}" }
 
                     if (callState.value !is CallState.Finished) {
                         sendMessageAndHandleResult<T>(methodMessage, callState)
@@ -940,7 +958,7 @@ class DDPClient(
 
                 pongListeners[pongCheckId] = object : PongListener {
                     override fun onPong(responseMessage: Incoming.Pong) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Pong received for connection check after exception" }
+                        logger.v(tag = "CONNECTION_RETRY") { "Pong received for connection check after exception" }
                         pongReceived = true
                         pongListeners.remove(responseMessage.id)
                     }
@@ -949,7 +967,7 @@ class DDPClient(
                 try {
                     val session = webSocketSession
                     if (session == null) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "WebSocket session is null during connection check" }
+                        logger.v(tag = "CONNECTION_RETRY") { "WebSocket session is null during connection check" }
                         connectionCheckFailed = true
                     } else {
                         session.sendSerialized(Outgoing.Ping(pongCheckId))
@@ -961,13 +979,13 @@ class DDPClient(
                         }
                     }
                 } catch (e: Exception) {
-                    Logger.d(tag = "CONNECTION_RETRY") { "Exception during connection check: ${e.message}" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Exception during connection check: ${e.message}" }
                     connectionCheckFailed = true
                 } finally {
                     pongListeners.remove(pongCheckId)
                 }
 
-                Logger.d(tag = "CONNECTION_RETRY") { "Connection check result - pong received: $pongReceived, checkFailed: $connectionCheckFailed, state: ${connectionState.value}" }
+                logger.v(tag = "CONNECTION_RETRY") { "Connection check result - pong received: $pongReceived, checkFailed: $connectionCheckFailed, state: ${connectionState.value}" }
 
                 if (callState.value is CallState.Finished) {
                     return
@@ -975,13 +993,13 @@ class DDPClient(
 
                 if (pongReceived) {
                     // Connection is fine, but exception occurred - this is a real error
-                    Logger.d(tag = "CONNECTION_RETRY") { "Connection is fine, but exception occurred - this is a real error setting state to finished" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Connection is fine, but exception occurred - this is a real error setting state to finished" }
                     send(MethodState.Exception(exception))
                     callState.value = CallState.Finished
                     close()
                 } else if (connectionCheckFailed || !pongReceived) {
                     // Connection failed, restart and retry
-                    Logger.d(tag = "CONNECTION_RETRY") { "Connection failed after exception, restarting for method ${methodMessage.method}" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Connection failed after exception, restarting for method ${methodMessage.method}" }
 
                     restartConnection()
 
@@ -992,14 +1010,14 @@ class DDPClient(
                     } ?: false
 
                     if (!reconnected) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Failed to reconnect within timeout for method ${methodMessage.method} setting state to finished" }
+                        logger.v(tag = "CONNECTION_RETRY") { "Failed to reconnect within timeout for method ${methodMessage.method} setting state to finished" }
                         send(MethodState.Exception(exception))
                         callState.value = CallState.Finished
                         close()
                         return
                     }
 
-                    Logger.d(tag = "CONNECTION_RETRY") { "Reconnected after exception, retrying method ${methodMessage.method}" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Reconnected after exception, retrying method ${methodMessage.method}" }
 
                     if (callState.value !is CallState.Finished) {
                         sendMessageAndHandleResult<T>(methodMessage, callState)
@@ -1008,10 +1026,10 @@ class DDPClient(
             }
 
             override suspend fun onConnectionClosed(exception: Exception) {
-                Logger.d(tag = "CONNECTION_RETRY") { "Connection closed: ${exception.message}" }
+                logger.v(tag = "CONNECTION_RETRY") { "Connection closed: ${exception.message}" }
                 // Connection was deliberately closed, just finish without retry
                 if (callState.value != CallState.Finished) {
-                    Logger.d(tag = "CONNECTION_RETRY") { "Connection closed: ${exception.message} setting state to finished" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Connection closed: ${exception.message} setting state to finished" }
                     send(MethodState.Exception(exception))
                     callState.value = CallState.Finished
                     close()
@@ -1026,11 +1044,11 @@ class DDPClient(
                     1
                 }
 
-                Logger.d(tag = "CONNECTION_RETRY") { "Timeout occurred for method ${methodMessage.method}, count: $timeoutCount, current state: $currentState" }
+                logger.v(tag = "CONNECTION_RETRY") { "Timeout occurred for method ${methodMessage.method}, count: $timeoutCount, current state: $currentState" }
 
                 // Only send exception and finish if this is the second timeout
                 if (timeoutCount >= 2) {
-                    Logger.d(tag = "CONNECTION_RETRY") { "Timeout occurred for method setting state to finished" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Timeout occurred for method setting state to finished" }
                     send(MethodState.Exception(TimeoutException(timeout)))
                     callState.value = CallState.Finished
                     close()
@@ -1042,14 +1060,14 @@ class DDPClient(
 
                 // Check current connection state before trying to ping
                 val currentConnectionState = connectionState.value
-                Logger.d(tag = "CONNECTION_RETRY") { "Current connection state before check: $currentConnectionState" }
+                logger.v(tag = "CONNECTION_RETRY") { "Current connection state before check: $currentConnectionState" }
 
                 // If already disconnected or connecting, skip ping check and just reconnect
                 if (currentConnectionState is ConnectionState.Disconnected ||
                     currentConnectionState is ConnectionState.Connecting ||
                     currentConnectionState == ConnectionState.NotConnected ||
                     currentConnectionState == ConnectionState.Paused) {
-                    Logger.d(tag = "CONNECTION_RETRY") { "Connection state indicates disconnection, skipping ping check" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Connection state indicates disconnection, skipping ping check" }
 
                     // Paused must be resumed here; restartConnection() is a no-op while Paused,
                     // which would leave this call hanging until timeout. reconnect() resumes instead.
@@ -1061,14 +1079,14 @@ class DDPClient(
                     } ?: false
 
                     if (!reconnected) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Failed to reconnect within timeout for method ${methodMessage.method} setting state to finished" }
+                        logger.v(tag = "CONNECTION_RETRY") { "Failed to reconnect within timeout for method ${methodMessage.method} setting state to finished" }
                         send(MethodState.Exception(TimeoutException(timeout)))
                         callState.value = CallState.Finished
                         close()
                         return
                     }
 
-                    Logger.d(tag = "CONNECTION_RETRY") { "Reconnected, retrying method ${methodMessage.method}" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Reconnected, retrying method ${methodMessage.method}" }
 
                     if (callState.value !is CallState.Finished) {
                         sendMessageAndHandleResult<T>(methodMessage, callState)
@@ -1084,7 +1102,7 @@ class DDPClient(
                 // Create a listener to track if pong is received
                 pongListeners[pongCheckId] = object : PongListener {
                     override fun onPong(responseMessage: Incoming.Pong) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Pong received for connection check" }
+                        logger.v(tag = "CONNECTION_RETRY") { "Pong received for connection check" }
                         pongReceived = true
                         pongListeners.remove(responseMessage.id)
                     }
@@ -1093,7 +1111,7 @@ class DDPClient(
                 try {
                     val session = webSocketSession
                     if (session == null) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "WebSocket session is null during connection check" }
+                        logger.v(tag = "CONNECTION_RETRY") { "WebSocket session is null during connection check" }
                         connectionCheckFailed = true
                     } else {
                         session.sendSerialized(Outgoing.Ping(pongCheckId))
@@ -1106,13 +1124,13 @@ class DDPClient(
                         }
                     }
                 } catch (e: Exception) {
-                    Logger.d(tag = "CONNECTION_RETRY") { "Exception during connection check: ${e.message}" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Exception during connection check: ${e.message}" }
                     connectionCheckFailed = true
                 } finally {
                     pongListeners.remove(pongCheckId)
                 }
 
-                Logger.d(tag = "CONNECTION_RETRY") { "Connection check result - pong received: $pongReceived, checkFailed: $connectionCheckFailed, state: ${connectionState.value}" }
+                logger.v(tag = "CONNECTION_RETRY") { "Connection check result - pong received: $pongReceived, checkFailed: $connectionCheckFailed, state: ${connectionState.value}" }
 
                 if (callState.value is CallState.Finished) {
                     // Already finished, don't retry
@@ -1122,13 +1140,13 @@ class DDPClient(
                 if (pongReceived) {
                     // Connection is fine, but server didn't respond - this is a real timeout
                     // Throw timeout exception immediately
-                    Logger.d(tag = "CONNECTION_RETRY") { "Connection is fine, but server didn't respond - this is a real timeout setting state to finished" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Connection is fine, but server didn't respond - this is a real timeout setting state to finished" }
                     send(MethodState.Exception(TimeoutException(timeout)))
                     callState.value = CallState.Finished
                     close()
                 } else if (connectionCheckFailed || !pongReceived) {
                     // Connection failed, restart and retry
-                    Logger.d(tag = "CONNECTION_RETRY") { "Connection failed, restarting for method ${methodMessage.method}" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Connection failed, restarting for method ${methodMessage.method}" }
 
                     restartConnection()
 
@@ -1139,14 +1157,14 @@ class DDPClient(
                     } ?: false
 
                     if (!reconnected) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Failed to reconnect within timeout for method ${methodMessage.method} setting state to finished" }
+                        logger.v(tag = "CONNECTION_RETRY") { "Failed to reconnect within timeout for method ${methodMessage.method} setting state to finished" }
                         send(MethodState.Exception(TimeoutException(timeout)))
                         callState.value = CallState.Finished
                         close()
                         return
                     }
 
-                    Logger.d(tag = "CONNECTION_RETRY") { "Reconnected, retrying method ${methodMessage.method}" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Reconnected, retrying method ${methodMessage.method}" }
 
                     if (callState.value !is CallState.Finished) {
                         sendMessageAndHandleResult<T>(methodMessage, callState)
@@ -1178,7 +1196,7 @@ class DDPClient(
                     onLaunchTokenRefresh
                 )
             } else {
-                Logger.d(tag = "CONNECTION_RETRY") { "Error received for method ${methodMessage.method}, setting state to finished" }
+                logger.v(tag = "CONNECTION_RETRY") { "Error received for method ${methodMessage.method}, setting state to finished" }
                 send(MethodState.Error(error))
                 callState.value = CallState.Finished
                 close()
@@ -1188,7 +1206,7 @@ class DDPClient(
             val resultObject = responseMessage.result?.let {
                 json.decodeFromJsonElement<T>(it)
             }
-            Logger.d(tag = "CONNECTION_RETRY") { "Result received for method ${methodMessage.method}, setting state to finished" }
+            logger.v(tag = "CONNECTION_RETRY") { "Result received for method ${methodMessage.method}, setting state to finished" }
             send(MethodState.Success(resultObject))
             callState.value = CallState.Finished
             close()
@@ -1209,7 +1227,7 @@ class DDPClient(
                     if (it == AuthenticationState.Authorized) {
                         sendMessageAndHandleResult<T>(methodMessage, callState)
                     } else if (it == AuthenticationState.Unauthorized) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Unauthorized for method ${methodMessage.method}, setting state to finished" }
+                        logger.v(tag = "CONNECTION_RETRY") { "Unauthorized for method ${methodMessage.method}, setting state to finished" }
                         send(MethodState.Error(error))
                         callState.value = CallState.Finished
                         close()
@@ -1225,7 +1243,7 @@ class DDPClient(
         outgoing: Outgoing.Method,
         callState: MutableStateFlow<CallState>
     ) = launch {
-        Logger.d(tag = "CONNECTION_RETRY") { "Sending message ${outgoing.method}, current state: ${callState.value}" }
+        logger.v(tag = "CONNECTION_RETRY") { "Sending message ${outgoing.method}, current state: ${callState.value}" }
 
         // Start timeout for this specific call
         val timeoutJob = launch {
@@ -1235,7 +1253,7 @@ class DDPClient(
 
             // If result is null, timeout occurred
             if (result == null && callState.value != CallState.Finished) {
-                Logger.d(tag = "CONNECTION_RETRY") { "Timeout detected for method ${outgoing.method}, state before timeout: ${callState.value}" }
+                logger.v(tag = "CONNECTION_RETRY") { "Timeout detected for method ${outgoing.method}, state before timeout: ${callState.value}" }
                 methodResultListeners[outgoing.id]?.onTimeout()
             }
         }
@@ -1244,12 +1262,12 @@ class DDPClient(
             sendMessage(outgoing).collect { messageState ->
                 when (messageState) {
                     is MessageState.Success -> {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Message sent successfully ${outgoing.method}" }
+                        logger.v(tag = "CONNECTION_RETRY") { "Message sent successfully ${outgoing.method}" }
                         // Keep the current state - don't reset to Active
                         // The timeout counter should be preserved in Resending state
                     }
                     is MessageState.Failed -> {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Failed to send message ${outgoing.method} exception ${messageState.exception}" }
+                        logger.v(tag = "CONNECTION_RETRY") { "Failed to send message ${outgoing.method} exception ${messageState.exception}" }
                         timeoutJob.cancel()
 
                         // Call onException to handle the failure
@@ -1261,20 +1279,20 @@ class DDPClient(
                 }
             }
         } catch (e: Exception) {
-            Logger.d(tag = "CONNECTION_RETRY") { "Exception while sending message ${outgoing.method}: ${e.message}" }
+            logger.v(tag = "CONNECTION_RETRY") { "Exception while sending message ${outgoing.method}: ${e.message}" }
             timeoutJob.cancel()
 
             // Check if this is a cancellation exception
             if (e is CancellationException) {
                 // If we're already finished, this cancellation is expected (flow cleanup)
                 if (callState.value == CallState.Finished) {
-                    Logger.d(tag = "CONNECTION_RETRY") { "Coroutine cancelled for ${outgoing.method} after completion - this is expected" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Coroutine cancelled for ${outgoing.method} after completion - this is expected" }
                     return@launch
                 }
 
                 // If we're not finished yet, this is an unexpected cancellation
                 // Treat it as a connection error and trigger retry logic
-                Logger.d(tag = "CONNECTION_RETRY") { "Unexpected cancellation for ${outgoing.method} - treating as connection error" }
+                logger.v(tag = "CONNECTION_RETRY") { "Unexpected cancellation for ${outgoing.method} - treating as connection error" }
                 methodResultListeners[outgoing.id]?.onException(Exception("Channel was cancelled unexpectedly", e))
                 return@launch
             }
@@ -1288,21 +1306,21 @@ class DDPClient(
 
     @OptIn(ExperimentalCoroutinesApi::class)
     fun sendMessage(outgoing: Outgoing): Flow<MessageState> = flow {
-        Logger.d(tag = "CONNECTION_RETRY") { "Sending message 5 ${outgoing} connection state ${connectionState.value}" }
+        logger.v(tag = "CONNECTION_RETRY") { "Sending message 5 ${outgoing} connection state ${connectionState.value}" }
         if (connectionState.value != ConnectionState.DDPConnected && connectionState.value !is ConnectionState.Connecting && connectionState.value != ConnectionState.Paused) {
-            Logger.d(tag = "CONNECTION_RETRY") { "Restarting connection 2" }
+            logger.v(tag = "CONNECTION_RETRY") { "Restarting connection 2" }
             restartConnection()
                 .flatMapLatest {
                     when (it) {
                         ConnectionState.DDPConnected -> {
-                            Logger.d(tag = "CONNECTION_RETRY") { "Connection restarted refreshing token" }
+                            logger.v(tag = "CONNECTION_RETRY") { "Connection restarted refreshing token" }
                             coroutineScope {
                                 refreshToken()
                             }
                             authenticationState
                         }
                         is ConnectionState.Disconnected -> {
-                            Logger.d(tag = "CONNECTION_RETRY") { "Connection disconnected emitting Unauthorized" }
+                            logger.v(tag = "CONNECTION_RETRY") { "Connection disconnected emitting Unauthorized" }
                             flowOf(AuthenticationState.Unauthorized)
                         }
                         else -> {
@@ -1317,12 +1335,12 @@ class DDPClient(
                 // emitting a second MessageState.Success. sendMessage delivers one message and
                 // then finishes, so the collection has to stop at the first terminal outcome.
                 .transformWhile { authState ->
-                    Logger.d(tag = "CONNECTION_RETRY") { "Authentication state changed ${authState}" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Authentication state changed ${authState}" }
                     val session = webSocketSession
 
                     when {
                         authState == AuthenticationState.Authorized && session != null -> {
-                            Logger.d(tag = "CONNECTION_RETRY") { "Sending message 2 ${outgoing} connection state ${connectionState.value}" }
+                            logger.v(tag = "CONNECTION_RETRY") { "Sending message 2 ${outgoing} connection state ${connectionState.value}" }
                             session.sendSerialized(outgoing)
                             emit(MessageState.Success)
                             false
@@ -1341,15 +1359,15 @@ class DDPClient(
             // outlived the send and re-sent on the next DDPConnected (after any later drop).
             connectionState
                 .transformWhile {
-                    Logger.d(tag = "CONNECTION_RETRY") { "Sending message 3 connection state changed" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Sending message 3 connection state changed" }
                     if (it is ConnectionState.Connecting) return@transformWhile true
 
                     val connected = it is ConnectionState.DDPConnected
 
                     val session = webSocketSession
-                    Logger.d(tag = "CONNECTION_RETRY") { "Sending message 3 session $session connection state ${connectionState.value}" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Sending message 3 session $session connection state ${connectionState.value}" }
                     if (connected && session != null) {
-                        Logger.d(tag = "CONNECTION_RETRY") { "Sending message 3 ${outgoing} connection state ${connectionState.value}" }
+                        logger.v(tag = "CONNECTION_RETRY") { "Sending message 3 ${outgoing} connection state ${connectionState.value}" }
                         session.sendSerialized(outgoing)
                         emit(MessageState.Success)
                     } else if (it is ConnectionState.Disconnected) {
@@ -1364,7 +1382,7 @@ class DDPClient(
             val session = webSocketSession
 
             if (session != null) {
-                Logger.d(tag = "CONNECTION_RETRY") { "Sending message 4 ${outgoing} connection state ${connectionState.value}" }
+                logger.v(tag = "CONNECTION_RETRY") { "Sending message 4 ${outgoing} connection state ${connectionState.value}" }
                 session.sendSerialized(outgoing)
                 emit(MessageState.Success)
             } else {
@@ -1416,14 +1434,14 @@ class DDPClient(
                 }
             }
             is Incoming.NoSub -> {
-                Logger.d(tag = "CONNECTION_RETRY") { "NoSub received, closing connection for ${subscriptionResultListeners[incoming.id]}" }
+                logger.v(tag = "CONNECTION_RETRY") { "NoSub received, closing connection for ${subscriptionResultListeners[incoming.id]}" }
                 subscriptionResultListeners[incoming.id]?.onNoSub(incoming)
             }
             is Incoming.Result -> {
                 methodResultListeners[incoming.id]?.onResult(incoming)
             }
             Incoming.Close -> {
-                Logger.d(tag = "CONNECTION_RETRY") { "Close received, closing connection" }
+                logger.v(tag = "CONNECTION_RETRY") { "Close received, closing connection" }
                 closeConnection()
                 // Do NOT throw here: handleIncoming runs *before* emit(), so throwing made
                 // Incoming.Close unreachable for every collector -- a public sealed member that

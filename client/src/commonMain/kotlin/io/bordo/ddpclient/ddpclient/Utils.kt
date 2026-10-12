@@ -36,7 +36,10 @@ object Utils {
 }
 
 @OptIn(DelicateCoroutinesApi::class)
-suspend inline fun DefaultClientWebSocketSession.receiveAll(block: DefaultClientWebSocketSession.(Incoming) -> Unit) {
+suspend inline fun DefaultClientWebSocketSession.receiveAll(
+    logger: Logger,
+    block: DefaultClientWebSocketSession.(Incoming) -> Unit,
+) {
     while (true) {
         incoming.receiveCatching()
             .onSuccess { frame ->
@@ -77,22 +80,22 @@ suspend inline fun DefaultClientWebSocketSession.receiveAll(block: DefaultClient
                 block(incomingMessage)
             }
             .onClosed { cause ->
-                Logger.d(tag = "CONNECTION_RETRY") { "Channel closed: ${cause?.message ?: "no cause"} $cause" }
+                logger.v(tag = "CONNECTION_RETRY") { "Channel closed: ${cause?.message ?: "no cause"} $cause" }
                 // Explicitly emit Close message when channel closes
                 block(Incoming.Close)
                 break // Exit the loop gracefully
             }
             .onFailure { error ->
-                Logger.d(tag = "CONNECTION_RETRY") { "Receive failed: ${error?.message ?: "unknown error"}" }
+                logger.v(tag = "CONNECTION_RETRY") { "Receive failed: ${error?.message ?: "unknown error"}" }
                 if (error != null) {
                     throw error
                 } else {
                     // Channel closed without explicit error - treat as graceful close
-                    Logger.d(tag = "CONNECTION_RETRY") { "Channel closed in onFailure without error" }
+                    logger.v(tag = "CONNECTION_RETRY") { "Channel closed in onFailure without error" }
                     block(Incoming.Close)
                     break
                 }
             }
     }
-    Logger.d(tag = "CONNECTION_RETRY") { "receiveAll exited" }
+    logger.v(tag = "CONNECTION_RETRY") { "receiveAll exited" }
 }
