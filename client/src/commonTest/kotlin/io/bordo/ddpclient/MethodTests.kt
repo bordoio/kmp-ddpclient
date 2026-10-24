@@ -3,6 +3,7 @@ package io.bordo.ddpclient
 import app.cash.turbine.test
 import co.touchlab.kermit.Logger
 import io.bordo.ddpclient.ddpclient.AuthenticationState
+import io.bordo.ddpclient.ddpclient.ConnectionState
 import io.bordo.ddpclient.ddpclient.Incoming
 import io.bordo.ddpclient.ddpclient.MethodState
 import io.bordo.ddpclient.ddpclient.Outgoing
@@ -469,6 +470,48 @@ class MethodTests {
                 cancelAndIgnoreRemainingEvents()
             }
 
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Serializable
+    data class Tier(val price: Int)
+
+    @Test
+    @IgnoreNative
+    fun `when a result cannot be decoded only that call fails and the connection stays up`() = ddpTestApplication {
+        val ddpClient = TestDDPClient()
+        val expectedUser = User("foo", "bar")
+
+        testServer {
+            receive(times = 2) {
+                assertIs<Outgoing.Method>(it)
+                val result = if (it.method == "tiers") {
+                    // A decimal where Tier.price is Int: the real subscriptionPlans.list failure.
+                    buildJsonObject { put("price", JsonPrimitive(9.99)) }
+                } else {
+                    json.encodeToJsonElement(expectedUser).jsonObject
+                }
+                sendSerialized(Incoming.Result(it.id, null, result))
+            }
+        }
+
+        ddpClient.initConnection().testAfterConnected {
+            ddpClient.call<Tier>("tiers").test {
+                assertEquals(MethodState.Loading, awaitItem())
+                assertIs<MethodState.Exception>(awaitItem())
+                awaitComplete()
+            }
+            assertEquals(ConnectionState.DDPConnected, ddpClient.connectionState.value)
+
+            ddpClient.call<User>("users").test {
+                assertEquals(MethodState.Loading, awaitItem())
+                assertEquals(MethodState.Success(expectedUser), awaitItem())
+                awaitComplete()
+            }
+            assertEquals(ConnectionState.DDPConnected, ddpClient.connectionState.value)
+
+            ddpClient.closeConnection()
             cancelAndIgnoreRemainingEvents()
         }
     }
