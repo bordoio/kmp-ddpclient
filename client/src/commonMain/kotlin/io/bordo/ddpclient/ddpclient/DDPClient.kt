@@ -1203,8 +1203,19 @@ class DDPClient(
             }
         }
         else {
-            val resultObject = responseMessage.result?.let {
-                json.decodeFromJsonElement<T>(it)
+            // This runs on the receive loop: an escaping decode failure (result shape doesn't match
+            // T) tore down the websocket and never finished this call, so it was resent after the
+            // timeout and failed the same way. It is this call's failure, not the connection's.
+            val resultObject = try {
+                responseMessage.result?.let { json.decodeFromJsonElement<T>(it) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Logger.e(tag = "CONNECTION_RETRY", throwable = e, messageString = "Cannot decode result of ${methodMessage.method}")
+                send(MethodState.Exception(e))
+                callState.value = CallState.Finished
+                close()
+                return
             }
             logger.v(tag = "CONNECTION_RETRY") { "Result received for method ${methodMessage.method}, setting state to finished" }
             send(MethodState.Success(resultObject))
